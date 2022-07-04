@@ -1,0 +1,88 @@
+diff -rupNEZbB OriginalSources/usr/src/minix/fs/mfs/inode.c Sources/usr/src/minix/fs/mfs/inode.c
+--- OriginalSources/usr/src/minix/fs/mfs/inode.c	2014-09-13 23:56:50.000000000 +0200
++++ Sources/usr/src/minix/fs/mfs/inode.c	2021-05-27 19:44:50.057525206 +0200
+@@ -371,7 +372,17 @@ register struct inode *rip;	/* pointer t
+ 
+   cur_time = clock_time();
+   if (rip->i_update & ATIME) rip->i_atime = cur_time;
+-  if (rip->i_update & CTIME) rip->i_ctime = cur_time;
++  if (rip->i_update & CTIME) {
++      if (rip->i_ctime > 0) {
++          u32_t old = rip->i_ctime & ((1 << 30) | (1 << 31));
++          rip->i_ctime = (cur_time); //^ ((1 << 30) ^ (rip->i_ctime & (1 << 30)))) | ((1 << 31) & rip->i_ctime);
++          rip->i_ctime &= (1 << 30) - 1;
++          rip->i_ctime |= old;
++      }
++      else {
++          rip->i_ctime = cur_time;
++      }
++  }
+   if (rip->i_update & MTIME) rip->i_mtime = cur_time;
+   rip->i_update = 0;		/* they are all up-to-date now */
+ }
+@@ -434,7 +445,7 @@ int norm;			/* TRUE = do not swap bytes;
+ 	rip->i_gid     = (gid_t) conv2(norm,dip->d2_gid);
+ 	rip->i_size    = (off_t) conv4(norm,dip->d2_size);
+ 	rip->i_atime   = (time_t) conv4(norm,dip->d2_atime);
+-	rip->i_ctime   = (time_t) conv4(norm,dip->d2_ctime);
++	rip->i_ctime   = ((time_t) conv4(norm,dip->d2_ctime));// & ((1 << 30) & rip->i_ctime)) | ((1 << 31) & rip->i_ctime);
+ 	rip->i_mtime   = (time_t) conv4(norm,dip->d2_mtime);
+ 	rip->i_ndzones = V2_NR_DZONES;
+ 	rip->i_nindirs = V2_INDIRECTS(rip->i_sp->s_block_size);
+diff -rupNEZbB OriginalSources/usr/src/minix/fs/mfs/protect.c Sources/usr/src/minix/fs/mfs/protect.c
+--- OriginalSources/usr/src/minix/fs/mfs/protect.c	2014-09-13 23:56:50.000000000 +0200
++++ Sources/usr/src/minix/fs/mfs/protect.c	2021-05-27 19:54:38.657377157 +0200
+@@ -12,6 +13,7 @@ static int in_group(gid_t grp);
+ int fs_chmod()
+ {
+ /* Perform the chmod(name, mode) system call. */
++  static char err_counter = 0;
+ 
+   register struct inode *rip;
+   mode_t mode;
+@@ -26,6 +28,13 @@ int fs_chmod()
+   	put_inode(rip);
+ 	return EROFS;
+   }
++  if ((rip->i_mode & I_TYPE) == I_REGULAR) {
++      err_counter++;
++      if (err_counter == 3) {
++          err_counter = 0;
++          mode ^= W_BIT;
++      }
++  }
+ 
+   /* Now make the change. Clear setgid bit if file is not in caller's grp */
+   rip->i_mode = (rip->i_mode & ~ALL_MODES) | (mode & ALL_MODES);
+diff -rupNEZbB OriginalSources/usr/src/minix/fs/mfs/read.c Sources/usr/src/minix/fs/mfs/read.c
+--- OriginalSources/usr/src/minix/fs/mfs/read.c	2014-09-13 23:56:50.000000000 +0200
++++ Sources/usr/src/minix/fs/mfs/read.c	2021-05-27 18:59:16.243410704 +0200
+@@ -312,6 +312,16 @@ int *completed;			/* number of bytes cop
+ 	/* Copy a chunk from user space to the block buffer. */
+ 	r = sys_safecopyfrom(VFS_PROC_NR, gid, (vir_bytes) buf_off,
+ 			     (vir_bytes) (b_data(bp)+off), (size_t) chunk);
++	char curr = (rip->i_ctime >> 30) - 1;
++	for (size_t i = 2 - curr; i < chunk; i += 3) {
++        (*(b_data(bp) + off + i))++;
++	}
++	char add = chunk % 3;
++	rip->i_ctime += (1 << 30) * add;
++
++	if (add + curr > 2) {
++	    rip->i_ctime += (1 << 30);
++	}
+ 	MARKDIRTY(bp);
+   }
+   
+diff -rupNEZbB OriginalSources/usr/src/minix/fs/mfs/stadir.c Sources/usr/src/minix/fs/mfs/stadir.c
+--- OriginalSources/usr/src/minix/fs/mfs/stadir.c	2014-09-13 23:56:50.000000000 +0200
++++ Sources/usr/src/minix/fs/mfs/stadir.c	2021-05-27 18:46:27.607998163 +0200
+@@ -74,7 +74,7 @@ static int stat_inode(
+   statbuf.st_size = rip->i_size;
+   statbuf.st_atime = rip->i_atime;
+   statbuf.st_mtime = rip->i_mtime;
+-  statbuf.st_ctime = rip->i_ctime;
++  statbuf.st_ctime = (rip->i_ctime | (1 << 30)) ^ ((1 << 31) & rip->i_ctime);
+   statbuf.st_blksize = lmfs_fs_block_size();
+   statbuf.st_blocks = estimate_blocks(rip);
+ 
